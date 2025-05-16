@@ -60,22 +60,21 @@ def login_page():
 def load_sales_data():
     """Load real-time JSON sales data"""
     try:
+        st.write("Checking data file at:", os.path.abspath(DATA_PATH))  # Debug line
+        
         if not os.path.exists(DATA_PATH):
+            st.warning("Data file not found, creating empty file")
             with open(DATA_PATH, 'w') as f:
                 json.dump([], f)
             return []
         
-        current_mod_time = os.path.getmtime(DATA_PATH)
-        if current_mod_time > st.session_state.get('last_update', 0):
-            with open(DATA_PATH, 'r') as f:
-                data = json.load(f)
-                if not isinstance(data, list):
-                    return []
-                st.session_state.last_update = current_mod_time
-                return data
-        return st.session_state.get('sales_data', [])
+        with open(DATA_PATH, 'r') as f:
+            data = json.load(f)
+            st.write("Raw data loaded:", data[:2])  # Show first 2 entries
+            return data if isinstance(data, list) else []
+            
     except Exception as e:
-        st.error(f"Data loading error: {str(e)}")
+        st.error(f"Data loading failed: {str(e)}")
         return []
 
 def get_historical_data():
