@@ -2,10 +2,27 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import sqlite3
-from werkzeug.security import check_password_hash
-import subprocess
 import os
-from datetime import datetime
+from werkzeug.security import check_password_hash, generate_password_hash
+
+# Cloud-compatible paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, 'database/admin.db')
+DATA_PATH = os.path.join(BASE_DIR, 'synthetic_logs.csv')
+
+# Initialize database
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS admins
+                 (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT)''')
+    # Add default admin if none exists
+    if not c.execute("SELECT 1 FROM admins LIMIT 1").fetchone():
+        c.execute("INSERT INTO admins (username, password_hash) VALUES (?, ?)",
+                 ("admin", generate_password_hash("admin123")))
+    conn.commit()
+    conn.close(
 
 # Database setup (if needed)
 def setup_database():
