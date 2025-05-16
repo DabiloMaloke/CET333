@@ -4,146 +4,92 @@ import plotly.graph_objects as go
 import sqlite3
 import os
 from werkzeug.security import check_password_hash, generate_password_hash
+from datetime import datetime
 
-# Cloud-compatible paths
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'database/admin.db')
-DATA_PATH = os.path.join(BASE_DIR, 'synthetic_logs.csv')
+# ========== CLOUD CONFIG ==========
+BASE_DIR = os.getcwd()
+DB_PATH = os.path.join(BASE_DIR, "database", "admin.db")
+DATA_PATH = os.path.join(BASE_DIR, "synthetic_logs.csv")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-# Initialize database
+# ========== DATABASE SETUP ==========
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS admins
                  (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT)''')
+    
     # Add default admin if none exists
     if not c.execute("SELECT 1 FROM admins LIMIT 1").fetchone():
         c.execute("INSERT INTO admins (username, password_hash) VALUES (?, ?)",
-                 ("admin", generate_password_hash("admin123")))
-    conn.commit()
-    conn.close(
-
-# Database setup (if needed)
-def setup_database():
-    conn = sqlite3.connect('database/admin.db')
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL
-        )
-    """)
+                ("admin", generate_password_hash("admin123")))
     conn.commit()
     conn.close()
 
-# User authentication functions
-def get_admin(username):
-    conn = sqlite3.connect("database/admin.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM admins WHERE username = ?", (username,))
-    admin = cursor.fetchone()
-    conn.close()
-    return admin
-
-def verify_login(username, password):
-    admin = get_admin(username)
-    if admin and check_password_hash(admin[2], password):
-        return True
-    return False
-
-# Data fetching function
-def fetch_data_for_dashboard():
-    try:
-        logs = pd.read_csv('synthetic_logs.csv')
-        
-        total_requests = len(logs)
-        unique_visitors = logs["IP Address"].nunique()
-        
-        status_counts = logs["Status Code"].value_counts().to_dict()
-        endpoint_counts = logs["Endpoint"].value_counts().head(5).to_dict()
-
-        return {
-            "total_requests": total_requests,
-            "unique_visitors": unique_visitors,
-            "status_counts": status_counts,
-            "top_endpoints": endpoint_counts,
-            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-    except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        return None
-
-# Login page
+# ========== APP PAGES ==========
 def login_page():
-    st.title("Admin Dashboard Login")
-    
+    st.title("🔒 Admin Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     
     if st.button("Login"):
-        if verify_login(username, password):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM admins WHERE username = ?", (username,))
+        admin = c.fetchone()
+        conn.close()
+        
+        if admin and check_password_hash(admin[2], password):
             st.session_state['authenticated'] = True
             st.session_state['username'] = username
-            st.experimental_rerun()
+            st.rerun()
         else:
-            st.error("Invalid username or password")
+            st.error("❌ Invalid credentials")
 
-# Dashboard page
-def dashboard_page():
-    st.title("Web Analytics Dashboard")
-    
-    # Logout button
-    if st.button("Logout"):
-        st.session_state['authenticated'] = False
-        st.experimental_rerun()
-    
+def dashboard():
+    st.title("📊 Analytics Dashboard")
     st.write(f"Welcome, {st.session_state['username']}!")
     
-    data = fetch_data_for_dashboard()
-    if not data:
-        return
+    if st.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
     
-    # Display metrics
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Total Requests", data['total_requests'])
-    with col2:
-        st.metric("Unique Visitors", data['unique_visitors'])
-    
-    st.write(f"Last updated: {data['last_updated']}")
-    
-    # Status code distribution chart
-    st.subheader("Status Code Distribution")
-    status_fig = go.Figure([go.Bar(
-        x=list(data["status_counts"].keys()),  
-        y=list(data["status_counts"].values()),
-        marker_color="blue"
-    )])
-    st.plotly_chart(status_fig)
-    
-    # Top endpoints pie chart
-    st.subheader("Top 5 Endpoints")
-    endpoint_fig = go.Figure([go.Pie(
-        labels=list(data["top_endpoints"].keys()),
-        values=list(data["top_endpoints"].values())
-    ])
-    st.plotly_chart(endpoint_fig)
+    try:
+        df = pd.read_csv(DATA_PATH)
+        
+        # Metrics
+        col1, col2 = st.columns(2)
+        col1.metric("Total Requests", len(df))
+        col2.metric("Unique Visitors", df['IP Address'].nunique())
+        
+        # Status Codes Chart
+        st.subheader("🔄 Status Codes")
+        status_counts = df['Status Code'].value_counts()
+        fig1 = go.Figure(go.Bar(x=status_counts.index, y=status_counts.values))
+        st.plotly_chart(fig1, use_container_width=True)
+        
+        # Endpoints Chart
+        st.subheader("🔗 Top Endpoints")
+        endpoints = df['Endpoint'].value_counts().head(5)
+        fig2 = go.Figure(go.Pie(labels=endpoints.index, values=endpoints.values))
+        st.plotly_chart(fig2, use_container_width=True)
+        
+    except FileNotFoundError:
+        st.warning("⚠️ Waiting for log data...")
+        # Generate sample data if missing
+        sample_data = pd.DataFrame({
+            'IP Address': ['192.168.1.1', '10.0.0.1'],
+            'Status Code': [200, 404],
+            'Endpoint': ['/home', '/api']
+        })
+        sample_data.to_csv(DATA_PATH, index=False)
+        st.rerun()
 
-# Main app logic
-def main():
-    setup_database()
-    
-    if 'authenticated' not in st.session_state:
-        st.session_state['authenticated'] = False
-    
-    if st.session_state['authenticated']:
-        dashboard_page()
-    else:
-        login_page()
-
+# ========== APP INIT ==========
 if __name__ == "__main__":
-    # Start background processes if needed
-    # subprocess.Popen(["python", "data_generator.py"])
-    main()
+    init_db()
+    
+    if not st.session_state.get('authenticated'):
+        login_page()
+    else:
+        dashboard()
