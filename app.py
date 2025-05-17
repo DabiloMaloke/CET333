@@ -1,153 +1,136 @@
-import os
-from pathlib import Path
-import streamlit as st
-import json
-import time
-import plotly.graph_objects as go
-import plotly.express as px
-import pandas as pd
+from flask import Flask, render_template, redirect, url_for, request, flash, session
+from flask_login import LoginManager, UserMixin, login_user, login_required, current_user, logout_user
+from werkzeug.security import check_password_hash
 import sqlite3
-from datetime import datetime
-from io import StringIO
-from werkzeug.security import check_password_hash, generate_password_hash
+import pandas as pd
+import plotly.graph_objects as go
+import subprocess
+import os
 
-# ========== CLOUD CONFIG ==========
-BASE_DIR = os.getcwd()
-DB_PATH = os.path.join(BASE_DIR, "database", "admin.db")
-DATA_PATH = os.path.join(BASE_DIR, "sales_dashboard_data.json")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+app = Flask(__name__)
+app.secret_key = 'your_secret_key'  # Change this to a strong secret key
 
-# ========== AUTHENTICATION ==========
-def init_db():
-    """Initialize database with admin credentials"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS admins
-                 (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT)''')
-    
-    # Add default admin if none exists
-    if not c.execute("SELECT 1 FROM admins LIMIT 1").fetchone():
-        c.execute("INSERT INTO admins (username, password_hash) VALUES (?, ?)",
-                ("admin", generate_password_hash("admin123")))
-    conn.commit()
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"  # Redirects to login page if user is not authenticated
+
+# Define the User class
+class User(UserMixin):
+    def __init__(self, id, username, password_hash):
+        self.id = id
+        self.username = username
+        self.password_hash = password_hash
+
+@login_manager.user_loader
+def load_user(user_id):
+    conn = sqlite3.connect('database/admin.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM admins WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
     conn.close()
+    if user:
+        return User(user[0], user[1], user[2])
+    return None
 
+# Function to get admin details
 def get_admin(username):
-    """Retrieve admin from database"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM admins WHERE username = ?", (username,))
-    admin = c.fetchone()
+    conn = sqlite3.connect("database/admin.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM admins WHERE username = ?", (username,))
+    admin = cursor.fetchone()
     conn.close()
     return admin
 
-def login_page():
-    """Login page with authentication"""
-    st.title("🔒 Admin Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    
-    if st.button("Login"):
+# Root route redirects to login
+@app.route("/")
+def index():
+    if current_user.is_authenticated:
+        logout_user()  # Force logout when the user revisits
+        session.clear()  # Clear the session data
+    return redirect(url_for("login"))
+
+# Login route
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))  # Redirect if already logged in
+
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+
         admin = get_admin(username)
+
         if admin and check_password_hash(admin[2], password):
-            st.session_state['authenticated'] = True
-            st.session_state['username'] = username
-            st.rerun()
-        else:
-            st.error("❌ Invalid credentials")
+            user = User(admin[0], admin[1], admin[2])
+            login_user(user)
+            return redirect(url_for("dashboard"))
 
-# ========== DASHBOARD FUNCTIONS ==========
-def load_sales_data():
-    """Load real-time JSON sales data"""
-    try:
-        st.write("Checking data file at:", os.path.abspath(DATA_PATH))  # Debug line
-        
-        if not os.path.exists(DATA_PATH):
-            st.warning("Data file not found, creating empty file")
-            with open(DATA_PATH, 'w') as f:
-                json.dump([], f)
-            return []
-        
-        with open(DATA_PATH, 'r') as f:
-            data = json.load(f)
-            st.write("Raw data loaded:", data[:2])  # Show first 2 entries
-            return data if isinstance(data, list) else []
-            
-    except Exception as e:
-        st.error(f"Data loading failed: {str(e)}")
-        return []
+        flash("Invalid username or password.")
+    
+    return render_template("login.html")
 
-def get_historical_data():
-    """Fetch historical data from SQLite"""
-    try:
-        conn = sqlite3.connect(os.path.join(BASE_DIR, 'sales_data.db'))
-        query = "SELECT * FROM sales ORDER BY timestamp DESC"
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.error(f"Error loading historical data: {str(e)}")
-        return pd.DataFrame()
-    finally:
-        if 'conn' in locals():
-            conn.close()
+# Logout route
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
 
-# ========== DASHBOARD LAYOUT ==========
-def sales_dashboard():
-    """Main dashboard with real-time analytics"""
-    st.set_page_config(page_title="Real-Time Sales Dashboard", layout="wide")
-    
-    # Custom CSS
-    st.markdown("""
-    <style>
-        :root {
-            --primary-color: #00f2ff;
-            --secondary-color: #ff00e6;
-            --dark-bg: #0a0a1a;
-            --card-bg: rgba(20, 20, 40, 0.7);
-            --border-color: rgba(0, 242, 255, 0.3);
-        }
-        body {
-            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-            color: white;
-            font-family: 'Roboto', sans-serif;
-        }
-        .stMetric {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 10px;
-            padding: 20px;
-        }
-    </style>
-    """, unsafe_allow_html=True)
+# Function to fetch dashboard data
+def fetch_data_for_dashboard():
+    logs = pd.read_csv('synthetic_logs.csv')
 
-    st.title("📊 Real-Time Sales Dashboard")
-    st.markdown(f"Welcome, {st.session_state['username']} | [Logout](#logout)")
+    total_requests = len(logs)
+    unique_visitors = logs["IP Address"].nunique()
     
-    if st.button("Logout"):
-        st.session_state.clear()
-        st.rerun()
+    # Status Code Counts
+    status_counts = logs["Status Code"].value_counts().to_dict()
     
-    # Load and process data
-    sales_data = load_sales_data()
-    if not sales_data:
-        st.warning("Waiting for initial data...")
-        time.sleep(2)
-        st.rerun()
-    
-    df = pd.DataFrame(sales_data)
-    
-    # Dashboard content (your existing visualization code)
-    # ... [Include all your chart and metric code here] ...
-    
-    # Auto-refresh
-    time.sleep(3)
-    st.rerun()
+    # Top 5 Endpoints by Request Count
+    endpoint_counts = logs["Endpoint"].value_counts().head(5).to_dict()
 
-# ========== APP INITIALIZATION ==========
+    data = {
+        "total_requests": total_requests,
+        "unique_visitors": unique_visitors,
+        "status_counts": status_counts,
+        "top_endpoints": endpoint_counts
+    }
+
+    return data
+
+# Dashboard Route
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    data = fetch_data_for_dashboard()
+
+    # Bar Chart for Status Code Distribution
+    status_fig = go.Figure([go.Bar(
+        x=list(data["status_counts"].keys()),  
+        y=list(data["status_counts"].values()),
+        marker_color="blue"
+    )])
+    status_chart = status_fig.to_html(full_html=False)
+
+    # Pie Chart for Top 5 Endpoints
+    endpoint_fig = go.Figure([go.Pie(
+        labels=list(data["top_endpoints"].keys()),
+        values=list(data["top_endpoints"].values())
+    )])
+    endpoint_chart = endpoint_fig.to_html(full_html=False)
+
+    return render_template("dashboard.html", data=data, status_chart=status_chart, endpoint_chart=endpoint_chart)
+
+def start_background_processes():
+    # Start data generator
+    subprocess.Popen(["python", "data_generator.py"], creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+    # Start Streamlit dashboard
+    subprocess.Popen([
+        "streamlit", "run", "dashboard.py", "--server.headless", "true"
+    ], creationflags=subprocess.CREATE_NEW_CONSOLE)
+
 if __name__ == "__main__":
-    init_db()
-    
-    if not st.session_state.get('authenticated'):
-        login_page()
-    else:
-        sales_dashboard()
+    start_background_processes()
+    app.run(debug=True, use_reloader=False)  # Disables auto-reload
